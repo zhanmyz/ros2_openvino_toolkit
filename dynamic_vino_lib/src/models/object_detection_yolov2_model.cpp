@@ -49,14 +49,14 @@ bool Models::ObjectDetectionYolov2Model::updateLayerProperty(
   ov::preprocess::InputInfo& input_info = ppp.input(input_tensor_name_);
   const ov::Layout input_tensor_layout{"NHWC"};
   input_info.tensor().
-    set_element_type(ov::element::f32).
+    set_element_type(ov::element::u8).
     set_layout(input_tensor_layout);
   addInputInfo("input", input_tensor_name_);
 
 
   // set output property
   auto output_info_map = model -> outputs();
-  if (output_info_map.size() != 1) {
+  if (output_info_map.size() != 3) {
     slog::warn << "This model seems not Yolo-like! We got "
       << std::to_string(output_info_map.size()) << "outputs, but SSDnet has only one."
       << slog::endl;
@@ -101,19 +101,19 @@ bool Models::ObjectDetectionYolov2Model::updateLayerProperty(
   slog::info << "max proposal count is: " << getMaxProposalCount() << slog::endl;
 
   auto object_size = static_cast<int>(output_dims[3]);
-  if (object_size != 33) {
-    slog::warn << "This model is NOT Yolo-like, whose output data for each detected object"
-      << "should have 7 dimensions, but was " << std::to_string(object_size)
-      << slog::endl;
-    return false;
-  }
+  // if (object_size != 33) {
+  //   slog::warn << "This model is NOT Yolo-like, whose output data for each detected object"
+  //     << "should have 7 dimensions, but was " << std::to_string(object_size)
+  //     << slog::endl;
+  //   return false;
+  // }
   setObjectSize(object_size);
 
-  if (output_dims.size() != 2) {
-    slog::warn << "This model is not Yolo-like, output dimensions shoulld be 2, but was"
-      << std::to_string(output_dims.size()) << slog::endl;
-    return false;
-  }
+  // if (output_dims.size() != 2) {
+  //   slog::warn << "This model is not Yolo-like, output dimensions shoulld be 2, but was"
+  //     << std::to_string(output_dims.size()) << slog::endl;
+  //   return false;
+  // }
 
   printAttribute();
   slog::info << "This model is Yolo-like, Layer Property updated!" << slog::endl;
@@ -122,7 +122,7 @@ bool Models::ObjectDetectionYolov2Model::updateLayerProperty(
 
 const std::string Models::ObjectDetectionYolov2Model::getModelCategory() const
 {
-  return "Object Detection Yolo v2";
+  return "Object Detection Yolo v5";
 }
 
 bool Models::ObjectDetectionYolov2Model::enqueue(
@@ -151,6 +151,8 @@ bool Models::ObjectDetectionYolov2Model::matToBlob(
   ov::Tensor input_tensor =
     engine->getRequest().get_tensor(input_name);
 
+  auto resized_image(orig_image);
+
   ov::Shape blob_size = input_tensor.get_shape();
   const int width = blob_size[3];
   const int height = blob_size[2];
@@ -158,60 +160,28 @@ bool Models::ObjectDetectionYolov2Model::matToBlob(
   float * blob_data = input_tensor.data<float>();
 
 
-  int dx = 0;
-  int dy = 0;
-  int srcw = 0;
-  int srch = 0;
-
-  int IH = height;
-  int IW = width;
-
-  cv::Mat image = orig_image.clone();
-  cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
-
-  image.convertTo(image, CV_32F, 1.0 / 255.0, 0);
-  srcw = image.size().width;
-  srch = image.size().height;
-
-  cv::Mat resizedImg(IH, IW, CV_32FC3);
-  resizedImg = cv::Scalar(0.5, 0.5, 0.5);
-  int imw = image.size().width;
-  int imh = image.size().height;
-  float resize_ratio = static_cast<float>(IH) / static_cast<float>(std::max(imw, imh));
-  cv::resize(image, image, cv::Size(imw * resize_ratio, imh * resize_ratio));
-
-  int new_w = imw;
-  int new_h = imh;
-  if ((static_cast<float>(IW) / imw) < (static_cast<float>(IH) / imh)) {
-    new_w = IW;
-    new_h = (imh * IW) / imw;
-  } else {
-    new_h = IH;
-    new_w = (imw * IW) / imh;
+  if(width != orig_image.size().width || height != orig_image.size().height)
+  {
+    cv::resize(orig_image, resized_image, cv::Size(width, height));
   }
-  dx = (IW - new_w) / 2;
-  dy = (IH - new_h) / 2;
 
-  imh = image.size().height;
-  imw = image.size().width;
+  // // TODO size is for demo
+  size_t img_size = width*height;
 
-  for (int row = 0; row < imh; row++) {
-    for (int col = 0; col < imw; col++) {
-      for (int ch = 0; ch < 3; ch++) {
-        resizedImg.at<cv::Vec3f>(dy + row, dx + col)[ch] = image.at<cv::Vec3f>(row, col)[ch];
+  //nchw
+  for(size_t row =0; row < height; row++)
+  {
+      for(size_t col=0; col < width; col++)
+      {
+          for(size_t ch =0; ch < channels; ch++)
+          {
+            blob_data[img_size*ch + row*width + col] = float(resized_image.at<cv::Vec3b>(row,col)[ch])/255.0f;
+          }
       }
-    }
   }
 
-  for (int c = 0; c < channels; c++) {
-    for (int h = 0; h < height; h++) {
-      for (int w = 0; w < width; w++) {
-        blob_data[c * width * height + h * width + w] = resizedImg.at<cv::Vec3f>(h, w)[c];
-      }
-    }
-  }
+  slog::debug << "Convert input image to blob: DONE!" << slog::endl;
 
-  setFrameSize(srcw, srch);
   return true;
 }
 
@@ -221,136 +191,160 @@ bool Models::ObjectDetectionYolov2Model::fetchResults(
   const float & confidence_thresh,
   const bool & enable_roi_constraint)
 {
-  try {
-    if (engine == nullptr) {
-      slog::err << "Trying to fetch results from <null> Engines." << slog::endl;
+  slog::debug << "fetching Infer Resulsts from the given Yolov5 model" << slog::endl;
+
+  if (engine == nullptr) {
+    slog::err << "Trying to fetch results from <null> Engines." << slog::endl;
+    return false;
+  }
+
+  ov::InferRequest request = engine->getRequest();
+
+  std::string output = getOutputName();
+  std::vector<std::string> & labels = getLabels();
+  const float * detections = (float * )request.get_tensor(output).data();
+
+  std::string input = getInputName();
+  auto input_tensor = request.get_tensor(input);
+  ov::Shape input_shape = input_tensor.get_shape();
+  // int input_height = input_shape[2];
+  // int input_width = input_shape[3];
+
+  // --------------------------- Extracting layer parameters --------------------------------
+  std::vector<cv::Rect>  origin_rect;
+  std::vector<float> origin_rect_cof;
+  int s[3] = {80,40,20};
+
+  int index=0;
+
+  for (auto &output : outputs_data_map_) 
+  {
+      auto output_name = output.first;
+      ov::InferRequest request = engine->getRequest();
+      ov::Tensor blob = request.get_tensor(output_name);
+      parseYolov5(blob,s[index], confidence_thresh ,origin_rect, origin_rect_cof);
+      ++index;
+  }
+
+  // TODO xiansen nms_area_threshold
+  double nms_area_threshold = 0.02;
+
+  //后处理获得最终检测结果
+  std::vector<int> final_id;
+  cv::dnn::NMSBoxes(origin_rect, origin_rect_cof,
+                confidence_thresh ,nms_area_threshold,final_id);
+
+    //根据final_id获取最终结果
+    for(int i=0;i<final_id.size();++i)
+    {
+        cv::Rect resize_rect= origin_rect[final_id[i]];
+        dynamic_vino_lib::ObjectDetectionResult result(resize_rect);
+        result.setConfidence(origin_rect_cof[final_id[i]]);
+        result.setLabel("");
+        results.push_back(result);
+    }
+
+  slog::debug << "Analyzing YoloV5 Detection results..." << slog::endl;
+
+  return true;
+}
+
+bool Models::ObjectDetectionYolov2Model::parseYolov5(const ov::Tensor &blob, int net_grid, float cof_threshold,
+                            std::vector<cv::Rect>& o_rect, std::vector<float>& o_rect_cof)
+{
+  std::vector<int> anchors = getAnchors(net_grid);
+  ov::InferRequest request = engine->getRequest();
+  auto output_tensor = request.get_tensor(output);
+  float * output_blob = output_tensor.data<float>();
+   //80个类是85,一个类是6,n个类是n+5
+   //int item_size = 6;
+   int item_size = 85;
+    size_t anchor_n = 3;
+    for(int n=0;n<anchor_n;++n)
+    {
+      for(int i=0;i<net_grid;++i)
+      {
+        for(int j=0;j<net_grid;++j)
+        {
+            double box_prob = output_blob[n*net_grid*net_grid*item_size + i*net_grid*item_size + j *item_size+ 4];
+            box_prob = sigmoid(box_prob);
+            //框置信度不满足则整体置信度不满足
+            if(box_prob < cof_threshold)
+                continue;
+            
+            //注意此处输出为中心点坐标,需要转化为角点坐标
+            double x = output_blob[n*net_grid*net_grid*item_size + i*net_grid*item_size + j*item_size + 0];
+            double y = output_blob[n*net_grid*net_grid*item_size + i*net_grid*item_size + j*item_size + 1];
+            double w = output_blob[n*net_grid*net_grid*item_size + i*net_grid*item_size + j*item_size + 2];
+            double h = output_blob[n*net_grid*net_grid*item_size + i*net_grid*item_size + j *item_size+ 3];
+            
+            double max_prob = 0;
+            int idx=0;
+            for(int t=5;t<85;++t){
+                double tp= output_blob[n*net_grid*net_grid*item_size + i*net_grid*item_size + j *item_size+ t];
+                tp = sigmoid(tp);
+                if(tp > max_prob){
+                    max_prob = tp;
+                    idx = t;
+                }
+            }
+            float cof = box_prob * max_prob;                
+            //对于边框置信度小于阈值的边框,不关心其他数值,不进行计算减少计算量
+            if(cof < cof_threshold)
+                continue;
+
+            x = (sigmoid(x)*2 - 0.5 + j)*640.0f/net_grid;
+            y = (sigmoid(y)*2 - 0.5 + i)*640.0f/net_grid;
+            w = pow(sigmoid(w)*2,2) * anchors[n*2];
+            h = pow(sigmoid(h)*2,2) * anchors[n*2 + 1];
+
+            double r_x = x - w/2;
+            double r_y = y - h/2;
+            cv::Rect rect(round(r_x),round(r_y),round(w),round(h));
+            o_rect.push_back(rect);
+            o_rect_cof.push_back(cof);
+        }
+      }
+    }
+
+    if(o_rect.size() == 0) 
+    {
       return false;
     }
 
-    ov::InferRequest request = engine->getRequest();
-
-    std::string output = getOutputName();
-    std::vector<std::string> & labels = getLabels();
-    const float * detections = (float * )request.get_tensor(output).data();
-
-    std::string input = getInputName();
-    auto input_tensor = request.get_tensor(input);
-    ov::Shape input_shape = input_tensor.get_shape();
-    int input_height = input_shape[2];
-    int input_width = input_shape[3];
-
-    // --------------------------- Extracting layer parameters --------------------------------
-    const int num = 3; ///layer->GetParamAsInt("num");
-    const int coords = 9; ///layer->GetParamAsInt("coords");
-    const int classes = 21; ///layer->GetParamAsInt("classes");
-
-    auto output_tensor = request.get_tensor(output);
-    ov::Shape output_shape = output_tensor.get_shape();
-    const int out_tensor_h = static_cast<int>(output_shape[2]);;
-
-    std::vector<float> anchors = {
-      0.572730, 0.677385,
-      1.874460, 2.062530,
-      3.338430, 5.474340,
-      7.882820, 3.527780,
-      9.770520, 9.168280
-    };
-    auto side = out_tensor_h;
-
-    auto side_square = side * side;
-    // --------------------------- Parsing YOLO Region output -------------------------------------
-    std::vector<Result> raw_results;
-    for (int i = 0; i < side_square; ++i) {
-      int row = i / side;
-      int col = i % side;
-
-      for (int n = 0; n < num; ++n) {
-        int obj_index = getEntryIndex(side, coords, classes, n * side * side + i, coords);
-        int box_index = getEntryIndex(side, coords, classes, n * side * side + i, 0);
-
-        float scale = detections[obj_index];
-
-        if (scale < confidence_thresh) {
-          continue;
-        }
-
-        float x = (col + detections[box_index + 0 * side_square]) / side * input_width;
-        float y = (row + detections[box_index + 1 * side_square]) / side * input_height;
-        float height = std::exp(detections[box_index + 3 * side_square]) * anchors[2 * n + 1] /
-          side * input_height;
-        float width = std::exp(detections[box_index + 2 * side_square]) * anchors[2 * n] / side *
-          input_width;
-
-        for (int j = 0; j < classes; ++j) {
-          int class_index =
-            getEntryIndex(side, coords, classes, n * side_square + i, coords + 1 + j);
-
-          float prob = scale * detections[class_index];
-          if (prob < confidence_thresh) {
-            continue;
-          }
-
-          float x_min = x - width / 2;
-          float y_min = y - height / 2;
-
-          auto frame_size = getFrameSize();
-          float x_min_resized = x_min / input_width * frame_size.width;
-          float y_min_resized = y_min / input_height * frame_size.height;
-          float width_resized = width / input_width * frame_size.width;
-          float height_resized = height / input_height * frame_size.height;
-
-          cv::Rect r(x_min_resized, y_min_resized, width_resized, height_resized);
-          Result result(r);
-          // result.label_ = j;
-          std::string label = j <
-            labels.size() ? labels[j] : std::string("label #") + std::to_string(j);
-          result.setLabel(label);
-
-          result.setConfidence(prob);
-          raw_results.emplace_back(result);
-        }
-      }
-    }
-
-    std::sort(raw_results.begin(), raw_results.end());
-    for (unsigned int i = 0; i < raw_results.size(); ++i) {
-      if (raw_results[i].getConfidence() == 0) {
-        continue;
-      }
-      for (unsigned int j = i + 1; j < raw_results.size(); ++j) {
-        auto iou = dynamic_vino_lib::ObjectDetection::calcIoU(
-          raw_results[i].getLocation(), raw_results[j].getLocation());
-        if (iou >= 0.45) {
-          raw_results[j].setConfidence(0);
-        }
-      }
-    }
-
-    for (auto & raw_result : raw_results) {
-      if (raw_result.getConfidence() < confidence_thresh) {
-        continue;
-      }
-
-      results.push_back(raw_result);
-    }
-
-    raw_results.clear();
-
     return true;
-  } catch (const std::exception & error) {
-    slog::err << error.what() << slog::endl;
-    return false;
-  } catch (...) {
-    slog::err << "Unknown/internal exception happened." << slog::endl;
-    return false;
-  }
 }
 
-int Models::ObjectDetectionYolov2Model::getEntryIndex(
-  int side, int lcoords, int lclasses,
-  int location, int entry)
+//以下为工具函数
+// int Models::ObjectDetectionYolov2Model::getEntryIndex(int side, int lcoords, int lclasses, int location, int entry)
+// {
+//   int n = location / (side * side);
+//   int loc = location % (side * side);
+//   return n * side * side * (lcoords + lclasses + 1) + entry * side * side + loc;
+// }
+
+double Models::ObjectDetectionYolov2Model::sigmoid(double x)
 {
-  int n = location / (side * side);
-  int loc = location % (side * side);
-  return n * side * side * (lcoords + lclasses + 1) + entry * side * side + loc;
+  return (1 / (1 + exp(-x)));
+}
+
+std::vector<int> Models::ObjectDetectionYolov2Model::getAnchors(int net_grid)
+{
+    std::vector<int> anchors(6);
+    int a80[6] = {10,13, 16,30, 33,23};
+    int a40[6] = {30,61, 62,45, 59,119};
+    int a20[6] = {116,90, 156,198, 373,326}; 
+    if(net_grid == 80)
+    {
+        anchors.insert(anchors.begin(),a80,a80 + 6);
+    }
+    else if(net_grid == 40)
+    {
+        anchors.insert(anchors.begin(),a40,a40 + 6);
+    }
+    else if(net_grid == 20)
+    {
+        anchors.insert(anchors.begin(),a20,a20 + 6);
+    }
+    return anchors;
 }

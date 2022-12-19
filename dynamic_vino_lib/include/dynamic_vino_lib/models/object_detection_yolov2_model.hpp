@@ -59,6 +59,14 @@ public:
 protected:
 
   int getEntryIndex(int side, int lcoords, int lclasses, int location, int entry);
+  double sigmoid(double x);
+
+  std::vector<int> getAnchors(int net_grid);
+
+  bool parseYolov5(const ov::Tensor &blob,int net_grid,float cof_threshold,
+                    std::vector<cv::Rect>& o_rect, std::vector<float>& o_rect_cof);
+
+  cv::Rect detet2origin(const cv::Rect& dete_rect,float rate_to,int top,int left);
 };
 }  // namespace Models
 #endif  // DYNAMIC_VINO_LIB__MODELS__OBJECT_DETECTION_YOLOV2_MODEL_HPP_
