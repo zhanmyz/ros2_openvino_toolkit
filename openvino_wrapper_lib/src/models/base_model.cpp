@@ -26,6 +26,7 @@
 #include "openvino_wrapper_lib/models/base_model.hpp"
 #include "openvino_wrapper_lib/slog.hpp"
 #include "openvino_wrapper_lib/models/attributes/base_attribute.hpp"
+#include "openvino_wrapper_lib/engines/engine.hpp"
 
 // Validated Base Network
 Models::BaseModel::BaseModel(
